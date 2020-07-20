@@ -1,0 +1,134 @@
+--交易前验证拒贷码
+drop table if exists public_fkmx.lf_gzjudai;
+create table public_fkmx.lf_gzjudai as
+select
+user_gid,
+param_name,
+param_value,
+substr(from_unixtime(create_time/1000-3600),1,10) create_dt
+from
+(select
+user_gid,
+param_name,
+param_value,
+create_time,
+row_number() over(partition by user_gid,param_name order by create_time desc) num 
+from
+wsods.fk_derived_fk_bali_log
+where param_name in ('fk_315_credit_reason')
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')>= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 15)
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')<= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 1)
+)where
+num=1;
+
+
+
+
+--额度
+drop table if exists public_fkmx.lf_judai;
+create table public_fkmx.lf_judai as
+select
+a.*,
+b.param_value fk_034_amount
+from
+public_fkmx.lf_gzjudai a left join
+(select
+*
+from
+(select
+user_gid,
+param_value,
+row_number() over(partition by user_gid order by create_time desc) num 
+from
+wsods.fk_derived_fk_bali_log
+where param_name='fk_034_amount'
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')>= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 15)
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')<= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 1)
+)where
+num=1) b on a.user_gid=b.user_gid;
+
+
+
+--风险等级
+drop table if exists public_fkmx.lf_judai1;
+create table public_fkmx.lf_judai1 as
+select
+a.*,
+b.param_value fk_779_bali_risk_rating
+from
+public_fkmx.lf_judai a left join
+(select
+*
+from
+(select
+user_gid,
+param_value,
+row_number() over(partition by user_gid order by create_time desc) num 
+from
+wsods.fk_derived_fk_bali_log
+where param_name in ('fk_779_bali_risk_rating')
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')>= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 15)
+and from_unixtime(cast(substring(create_time,1,10) as bigint),'yyyy-MM-dd')<= date_sub(from_unixtime(unix_timestamp(),'yyyy-MM-dd'), 1)
+)where
+num=1) b on a.user_gid=b.user_gid;
+
+
+--新老户
+drop table if exists public_fkmx.lf_judaibc;
+create table public_fkmx.lf_judaibc as
+select
+a.*,
+b.cc,
+case when cc is null then 1 when (a.create_dt>=b.cc and cc is not null) then 2 else 1 end new_old
+from
+public_fkmx.lf_judai1 a
+left join (select bg_user_gid, 
+substr(from_unixtime(first_done_time/1000-3600),1,10) cc
+from public_fkmx.ina_1st_transdone) b on a.user_gid=b.bg_user_gid;
+
+
+
+--通过测算
+select 
+sum(fk_034_amount*100/2120)/10
+from 
+public_fkmx.lf_judaibc a
+left join (select bg_user_gid,max(overday) overday from public_fkmx.lf_over group by bg_user_gid)d on a.user_gid=d.bg_user_gid
+left join (SELECT user_gid,param_value,
+row_number() over (partition by user_gid order by create_time desc) num
+from wsods.fk_derived_personal_all_log 
+where
+param_name='personal_005_education_enum') e on e.user_gid=a.user_gid
+left join
+(SELECT user_gid,param_value,
+row_number() over (partition by user_gid order by create_time desc) num
+from wsods.fk_derived_inaiziwhatsapp_all_log 
+where
+param_name='inaiziwhatsapp_001_is_register_whatsapp') g on a.user_gid=g.user_gid
+left join
+(select user_gid,param_value,
+row_number() over (partition by user_gid order by create_time desc) num
+from wsods.fk_derived_sc_bali_log 
+where
+param_name='sc_320_bali_fourth_loan_modle'
+and ds>='20200101') h on h.user_gid=a.user_gid
+left join (select user_gid,param_value duotou,
+row_number() over (partition by user_gid order by create_time desc) num 
+from wsods.fk_derived_inaizimulti_all_log
+where
+param_name='inaizimulti_002_value07d'
+and ds>='20200101' ) k on k.user_gid=a.user_gid
+where
+(regexp_replace(regexp_replace(a.param_value,'DI997|DI999',''),'DH997|DH999','') not like '%D%' and a.param_value is not null )
+--(a.param_value='|' or a.param_value='||DI999' or a.param_value='||DI997')
+and overday=0
+and (k.num=1 or k.num is null)
+and new_old=2
+and (e.num=1 or e.num is null)
+and k.duotou=0
+and (g.num=1 or g.num is null)
+and (h.num=1 or h.num is null)
+and h.param_value>=550
+and fk_779_bali_risk_rating='A'
+and e.param_value not in (1,2,3)
+and (g.param_value !=0 or g.param_value is null);
